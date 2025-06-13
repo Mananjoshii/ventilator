@@ -1,0 +1,12 @@
+streamlit
+requests
+pandas
+numpy
+matplotlib
+scipy
+PyWavelets
+time
+collections
+math
+threading
+datetime
