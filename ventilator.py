@@ -191,4 +191,4 @@ def main():
         analyze_signal(ir_values, red_values, fs, name, age, gender)
 
 if __name__ == "__main__":
-    main() optimise this code for better accuracy
+    main() 
