@@ -287,11 +287,11 @@ def read_ir_data():
     ir_values = []
     red_values = []
     touched = False
-    start_time = None
-    MAX_SAMPLES = 1000
-    SAMPLE_INTERVAL = 1
+    SAMPLE_INTERVAL = 1  # seconds
     retries = 0
-    while len(ir_values) < MAX_SAMPLES:
+    start_time = None
+
+    while True:
         try:
             res = requests.get(API_URL, timeout=5)
             if res.status_code != 200:
@@ -299,26 +299,35 @@ def read_ir_data():
                 time.sleep(SAMPLE_INTERVAL)
                 retries += 1
                 if retries > 3:
+                    st.error("❌ Maximum retries reached. Aborting.")
                     break
                 continue
+
             data = res.json().get("data", [])
             for sample in data:
                 ir, red = sample
+
+                # Wait for finger touch detection
                 if not touched and ir > TOUCH_THRESHOLD:
-                    st.write("✋ Finger detected. Starting...")
+                    st.write("✋ Finger detected. Starting 30-second recording...")
                     touched = True
                     start_time = time.time()
+
                 if touched:
                     ir_values.append(ir)
                     red_values.append(red)
-            if touched and len(ir_values) >= MAX_SAMPLES:
-                st.success(f"✅ Collected {len(ir_values)} IR samples.")
-                break
-        except Exception as e:
-            st.error(f"Error fetching: {e}")
-        time.sleep(SAMPLE_INTERVAL)
-    return ir_values, red_values
 
+            # ✅ Time-based exit
+            if touched and (time.time() - start_time) >= READ_DURATION:
+                st.success(f"✅ Collected {len(ir_values)} samples in {READ_DURATION} seconds.")
+                break
+
+        except Exception as e:
+            st.error(f"❌ Error fetching: {e}")
+        time.sleep(SAMPLE_INTERVAL)
+
+    return ir_values, red_values
+    
 def display_real_time_waveforms(time_offset=0):
     """Display animated waveforms during data collection with real-time fluctuation"""
     current_time = datetime.now().strftime("%H:%M:%S")
