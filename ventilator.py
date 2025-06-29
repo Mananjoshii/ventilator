@@ -1,16 +1,12 @@
-# ✅ Streamlit Code with Hospital Ventilator-Style UI for IoT HealthStation-RVCE
-
 import streamlit as st
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
-from collections import deque
+from datetime import datetime
 import requests
 import math
-import threading
-from datetime import datetime
 
 st.set_page_config(page_title="IoT Ventilator UI", layout="wide")
 
@@ -138,7 +134,9 @@ st.markdown("""
     }
     
     .blink {
-        animation: blink 1s infinite;
+        animation: blink 1s infinite
+
+;
     }
     
     @keyframes blink {
@@ -163,8 +161,6 @@ st.markdown("""
 # === CONFIG ===
 READ_DURATION = 30
 TOUCH_THRESHOLD = 100000
-SAVE_IR_PATH = 'ir_cleaned_data.csv'
-SAVE_RED_PATH = 'red_cleaned_data.csv'
 API_URL = "https://health-monitor-7lno.onrender.com/latest"
 
 # Generate fake real-time waveforms for display during collection
@@ -207,8 +203,13 @@ def generate_fake_spo2(t):
     spo2 = 0.3 * np.sin(2 * np.pi * hr * t / 60) + 0.05 * np.random.normal(0, 1, len(t))
     return spo2
 
-# ThingSpeak function (unchanged)
-def send_to_thingspeak(spo2, rr, hr, name, age, gender, api_key):
+# ThingSpeak function
+def send_to_thingspeak(spo2, rr, hr, name, age, gender):
+    try:
+        api_key = st.secrets["THINGSPEAK_API_KEY"]
+    except KeyError:
+        st.error("❌ ThingSpeak API key not found. Please configure it in Streamlit secrets.")
+        return
     url = "https://api.thingspeak.com/update"
     payload = {
         "api_key": api_key,
@@ -220,7 +221,7 @@ def send_to_thingspeak(spo2, rr, hr, name, age, gender, api_key):
         "field6": name,
     }
     try:
-        response = requests.get(url, params=payload)
+        response = requests.get(url, params=payload, timeout=10)
         if response.status_code == 200:
             st.success("📡 Data pushed to ThingSpeak!")
         else:
@@ -228,7 +229,7 @@ def send_to_thingspeak(spo2, rr, hr, name, age, gender, api_key):
     except Exception as e:
         st.error(f"❌ Error sending to ThingSpeak: {e}")
 
-# === FILTERING FUNCTIONS (unchanged) ===
+# === FILTERING FUNCTIONS ===
 def bandpass_filter(signal, lowcut, highcut, fs, order=4):
     nyquist = 0.5 * fs
     low = lowcut / nyquist
@@ -289,27 +290,32 @@ def read_ir_data():
     touched = False
     SAMPLE_INTERVAL = 1  # seconds
     retries = 0
-    start_time = None
+    start_time = time.time()
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
 
-    while True:
+    while time.time() - start_time < READ_DURATION:
         try:
             res = requests.get(API_URL, timeout=5)
             if res.status_code != 200:
-                st.warning("Server error. Retrying...")
-                time.sleep(SAMPLE_INTERVAL)
+                status_placeholder.warning(f"Server error. Retry {retries + 1}/3...")
                 retries += 1
                 if retries > 3:
-                    st.error("❌ Maximum retries reached. Aborting.")
-                    break
+                    status_placeholder.error("❌ Maximum retries reached. Aborting.")
+                    return [], []
+                time.sleep(SAMPLE_INTERVAL)
                 continue
 
             data = res.json().get("data", [])
             for sample in data:
-                ir, red = sample
+                try:
+                    ir, red = sample
+                except (ValueError, TypeError):
+                    continue
 
                 # Wait for finger touch detection
                 if not touched and ir > TOUCH_THRESHOLD:
-                    st.write("✋ Finger detected. Starting 30-second recording...")
+                    status_placeholder.write("✋ Finger detected. Starting 30-second recording...")
                     touched = True
                     start_time = time.time()
 
@@ -317,41 +323,45 @@ def read_ir_data():
                     ir_values.append(ir)
                     red_values.append(red)
 
-            # ✅ Time-based exit
-            if touched and (time.time() - start_time) >= READ_DURATION:
-                st.success(f"✅ Collected {len(ir_values)} samples in {READ_DURATION} seconds.")
-                break
+            # Update progress
+            progress = min((time.time() - start_time) / READ_DURATION, 1.0)
+            progress_bar.progress(progress)
+            status_placeholder.markdown(f"""
+            <div class='collecting-indicator' style='text-align: center; font-size: 18px;'>
+                📊 COLLECTING DATA... {progress*100:.0f}% COMPLETE
+            </div>
+            """, unsafe_allow_html=True)
 
         except Exception as e:
-            st.error(f"❌ Error fetching: {e}")
+            status_placeholder.error(f"❌ Error fetching: {e}")
+            time.sleep(SAMPLE_INTERVAL)
+        
         time.sleep(SAMPLE_INTERVAL)
 
+    if ir_values and red_values:
+        st.success(f"✅ Collected {len(ir_values)} samples in {READ_DURATION} seconds.")
+    else:
+        st.error("❌ No valid data collected.")
     return ir_values, red_values
-    
+
 def display_real_time_waveforms(time_offset=0):
     """Display animated waveforms during data collection with real-time fluctuation"""
     current_time = datetime.now().strftime("%H:%M:%S")
-    
-    # Create scrolling time window (like a real monitor)
     window_duration = 8  # seconds
     t = np.linspace(time_offset, time_offset + window_duration, 800)
     
-    # Generate dynamic fake waveforms with time-based variation
     ecg = generate_fake_ecg(t)
     resp = generate_fake_resp(t)
     spo2_wave = generate_fake_spo2(t)
     
-    # Add real-time variation to make it look more realistic
-    variation_factor = 0.1 + 0.05 * np.sin(time_offset * 0.5)  # Slow breathing variation
+    variation_factor = 0.1 + 0.05 * np.sin(time_offset * 0.5)
     ecg *= (1 + variation_factor)
-    resp *= (1 + 0.15 * np.sin(time_offset * 0.3))  # Respiratory variation
-    spo2_wave *= (1 + 0.08 * np.cos(time_offset * 0.7))  # SpO2 variation
+    resp *= (1 + 0.15 * np.sin(time_offset * 0.3))
+    spo2_wave *= (1 + 0.08 * np.cos(time_offset * 0.7))
     
-    # Create plots with hospital monitor styling
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8))
     fig.patch.set_facecolor('black')
     
-    # ECG Plot - scrolling effect
     ax1.plot(t, ecg, color='#00ff41', linewidth=2.5)
     ax1.set_ylabel('ECG (mV)', color='white', fontsize=12, fontweight='bold')
     ax1.set_facecolor('black')
@@ -361,7 +371,6 @@ def display_real_time_waveforms(time_offset=0):
     ax1.set_xlim(time_offset, time_offset + window_duration)
     ax1.set_ylim(-0.6, 1.2)
     
-    # Respiratory Plot - scrolling effect
     ax2.plot(t, resp, color='#ffaa00', linewidth=2.5)
     ax2.set_ylabel('RESP (L/min)', color='white', fontsize=12, fontweight='bold')
     ax2.set_facecolor('black')
@@ -371,7 +380,6 @@ def display_real_time_waveforms(time_offset=0):
     ax2.set_xlim(time_offset, time_offset + window_duration)
     ax2.set_ylim(-0.8, 0.8)
     
-    # SpO2 Plot - scrolling effect
     ax3.plot(t, spo2_wave, color='#ff4444', linewidth=2.5)
     ax3.set_ylabel('SpO₂ (%)', color='white', fontsize=12, fontweight='bold')
     ax3.set_xlabel('Time (seconds)', color='white', fontsize=12)
@@ -386,6 +394,14 @@ def display_real_time_waveforms(time_offset=0):
     return fig
 
 def main():
+    # Initialize session state
+    if 'show_results' not in st.session_state:
+        st.session_state.show_results = False
+    if 'results_data' not in st.session_state:
+        st.session_state.results_data = {}
+    if 'patient_data' not in st.session_state:
+        st.session_state.patient_data = {'name': '', 'age': '', 'gender': 'Male'}
+
     # Header
     st.markdown("""
     <div class='ventilator-header'>
@@ -398,7 +414,6 @@ def main():
     st.markdown(f"""
     <div class='status-bar'>
         <div class='status-item'>⏰ {current_time}</div>
-       
     </div>
     """, unsafe_allow_html=True)
     
@@ -410,35 +425,28 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         
-        name = st.text_input("Patient Name", placeholder="Enter full name")
-        age = st.text_input("Age", placeholder="Enter age")
-        gender = st.selectbox("Gender", ["Male", "Female", "Other"])
+        st.session_state.patient_data['name'] = st.text_input("Patient Name", value=st.session_state.patient_data['name'], placeholder="Enter full name")
+        st.session_state.patient_data['age'] = st.text_input("Age", value=st.session_state.patient_data['age'], placeholder="Enter age")
+        st.session_state.patient_data['gender'] = st.selectbox("Gender", ["Male", "Female", "Other"], index=["Male", "Female", "Other"].index(st.session_state.patient_data['gender']))
         
         st.markdown("---")
         st.markdown("### 🔧 SYSTEM CONTROLS")
         
         if st.button("🔄 NEW SESSION", help="Clear buffer and start fresh"):
             try:
-                requests.post("https://health-monitor-7lno.onrender.com/reset")
+                requests.post("https://health-monitor-7lno.onrender.com/reset", timeout=5)
+                st.session_state.show_results = False
+                st.session_state.results_data = {}
+                st.session_state.patient_data = {'name': '', 'age': '', 'gender': 'Male'}
                 st.success("🧹 Buffer cleared! Ready for new patient.")
-            except:
-                st.warning("⚠ Could not reach the Flask reset endpoint.")
-        
-        
-
-    # Initialize session state for displaying results
-    if 'show_results' not in st.session_state:
-        st.session_state.show_results = False
-    if 'results_data' not in st.session_state:
-        st.session_state.results_data = {}
+            except Exception as e:
+                st.warning(f"⚠ Could not reach the Flask reset endpoint: {e}")
 
     # Main control button
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         if st.button("▶️ START MONITORING", key="start_btn", help="Begin data collection and analysis"):
             st.session_state.show_results = False
-            
-            # Show collection status
             st.markdown("""
             <div class='collecting-indicator' style='text-align: center; font-size: 24px; margin: 20px 0;'>
                 🔄 COLLECTING PATIENT DATA... PLEASE WAIT
@@ -448,120 +456,35 @@ def main():
             # Display real-time waveforms during collection
             st.markdown("### REAL-TIME MONITORING")
             waveform_placeholder = st.empty()
-            status_placeholder = st.empty()
             
-            # Start data collection in background using threading
-            import threading
-            import queue
+            # Collect data
+            ir_values, red_values = read_ir_data()
             
-            # Queue to store results from background thread
-            result_queue = queue.Queue()
-            
-            def collect_data_background():
-                """Background thread for data collection"""
-                try:
-                    ir_values, red_values = read_ir_data()
-                    
-                    if ir_values and red_values:
-                        # Perform calculations
-                        fs = len(ir_values) / READ_DURATION
-                        pd.DataFrame(ir_values, columns=["IR"]).to_csv(SAVE_IR_PATH, index=False)
-                        pd.DataFrame(red_values, columns=["RED"]).to_csv(SAVE_RED_PATH, index=False)
-                        
-                        filtered_ir = preprocess_signal(ir_values, fs)
-                        peaks = detect_breath_peaks(filtered_ir, fs)
-                        rr = math.ceil(len(peaks) * (60 / READ_DURATION))
-                        hr, _, _ = calculate_heart_rate(ir_values, fs)
-                        spo2, _ = calculate_spo2(np.array(ir_values), np.array(red_values), fs)
-                        
-                        result_queue.put({
-                            'success': True,
-                            'rr': rr, 'hr': hr, 'spo2': spo2,
-                            'ir_values': ir_values, 'red_values': red_values,
-                            'filtered_ir': filtered_ir, 'peaks': peaks
-                        })
-                    else:
-                        result_queue.put({'success': False})
-                except Exception as e:
-                    result_queue.put({'success': False, 'error': str(e)})
-            
-            # Start background data collection
-            data_thread = threading.Thread(target=collect_data_background)
-            data_thread.daemon = True
-            data_thread.start()
-            
-            # Show animated waveforms while data collection happens
-            start_time = time.time()
-            animation_duration = 35  # Maximum duration in case of timeout
-            
-            while time.time() - start_time < animation_duration:
-                current_offset = time.time() - start_time
+            if ir_values and red_values:
+                # Perform calculations
+                fs = len(ir_values) / READ_DURATION
+                filtered_ir = preprocess_signal(ir_values, fs)
+                peaks = detect_breath_peaks(filtered_ir, fs)
+                rr = math.ceil(len(peaks) * (60 / READ_DURATION))
+                hr, _, _ = calculate_heart_rate(ir_values, fs)
+                spo2, _ = calculate_spo2(np.array(ir_values), np.array(red_values), fs)
                 
-                # Update status with finger detection info
-                progress = min((current_offset / animation_duration) * 100, 100)
+                # Store results in session state
+                st.session_state.results_data = {
+                    'rr': rr, 'hr': hr, 'spo2': spo2,
+                    'ir_values': ir_values, 'red_values': red_values,
+                    'filtered_ir': filtered_ir, 'peaks': peaks
+                }
+                st.session_state.show_results = True
+                st.success("✅ Data collection completed successfully!")
                 
-                # Simulate finger detection stages
-                if progress < 20:
-                    detection_status = "🔍 SCANNING FOR FINGER..."
-                    status_color = "#ffaa00"
-                elif progress < 40:
-                    detection_status = "✋ FINGER DETECTED - CALIBRATING..."
-                    status_color = "#00ff41"
-                elif progress < 80:
-                    detection_status = "📊 COLLECTING BIOMETRIC DATA..."
-                    status_color = "#00ff41"
-                else:
-                    detection_status = "🔬 PROCESSING VITAL SIGNS..."
-                    status_color = "#00ffff"
-                
-                # Check if results are ready
-                if not result_queue.empty():
-                    # Set progress to 100% immediately when results are ready
-                    progress = 100
-                    detection_status = "✅ VITAL SIGNS READY!"
-                    status_color = "#00ff41"
-                
-                status_placeholder.markdown(f"""
-                <div style='text-align: center; margin: 10px 0;'>
-                    <div style='color: {status_color}; font-size: 18px; font-weight: bold; margin-bottom: 10px;'>
-                        {detection_status}
-                    </div>
-                    <div class='collecting-indicator' style='font-size: 16px;'>
-                        🔄 PROGRESS: {progress:.0f}% COMPLETE
-                    </div>
-                    
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Update waveforms with scrolling animation
+                # Display final waveforms
                 with waveform_placeholder.container():
-                    fig = display_real_time_waveforms(current_offset)
+                    fig = display_real_time_waveforms(time.time() - time.time())
                     st.pyplot(fig)
                     plt.close(fig)
-                
-                time.sleep(0.5)  # Update every 500ms for smooth animation
-                
-                # Break the loop if results are ready
-                if not result_queue.empty():
-                    break
-            
-            # Get results from background thread
-            try:
-                results = result_queue.get_nowait()
-                if results['success']:
-                    # Store results
-                    st.session_state.results_data = {
-                        'rr': results['rr'], 'hr': results['hr'], 'spo2': results['spo2'],
-                        'ir_values': results['ir_values'], 'red_values': results['red_values'],
-                        'filtered_ir': results['filtered_ir'], 'peaks': results['peaks']
-                    }
-                    st.session_state.show_results = True
-                    st.success("✅ Data collection completed successfully!")
-                else:
-                    st.error(f"❌ Data collection failed: {results.get('error', 'Unknown error')}")
-                    return
-            except queue.Empty:
-                st.error("❌ Data collection timeout. Please try again.")
+            else:
+                st.error("❌ Data collection failed. Please try again.")
                 return
     
     # Display results if available
@@ -647,7 +570,14 @@ def main():
         
         # Send to ThingSpeak
         if st.button("📡 TRANSMIT TO CLOUD"):
-            send_to_thingspeak(data['spo2'], data['rr'], data['hr'], name, age, gender, "VX26ZPD2D2YK5JRJ")
+            send_to_thingspeak(
+                data['spo2'], 
+                data['rr'], 
+                data['hr'], 
+                st.session_state.patient_data['name'], 
+                st.session_state.patient_data['age'], 
+                st.session_state.patient_data['gender']
+            )
 
 if __name__ == "__main__":
     main()
